@@ -30,7 +30,8 @@ RUN chmod +x start.sh
 EXPOSE 8000
 
 # Coolify / orchestrators can use this for liveness checks.
+# Honors PORT env var so the healthcheck still works if you run on a custom port.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-    CMD curl -fsS http://localhost:8000/api/health || exit 1
+    CMD curl -fsS "http://localhost:${PORT:-8000}/api/health" || exit 1
 
 CMD ["sh", "start.sh"]

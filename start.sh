@@ -14,7 +14,13 @@ if [ -f ".env" ]; then
     set +a
 fi
 
+# Bind config — env-overridable so Coolify / Heroku / Railway can set PORT directly.
+HOST="${HOST:-0.0.0.0}"
+PORT="${PORT:-8000}"
+
 echo "📋 Effective config (from environment):"
+echo "   HOST         = ${HOST}"
+echo "   PORT         = ${PORT}"
 echo "   LIVEKIT_URL  = ${LIVEKIT_URL:-<unset>}"
 echo "   GEMINI_MODEL = ${GEMINI_MODEL:-gemini-3.1-flash-live-preview}"
 echo "   SUPABASE_URL = ${SUPABASE_URL:-<unset>}"
@@ -32,8 +38,8 @@ cleanup() {
 # Forward shutdown signals so the container exits cleanly.
 trap cleanup TERM INT
 
-echo "🌐 Starting FastAPI server on :8000..."
-uvicorn server:app --host 0.0.0.0 --port 8000 &
+echo "🌐 Starting FastAPI server on ${HOST}:${PORT}..."
+uvicorn server:app --host "${HOST}" --port "${PORT}" &
 SERVER_PID=$!
 
 sleep 2
