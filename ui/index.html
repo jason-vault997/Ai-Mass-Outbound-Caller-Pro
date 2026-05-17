@@ -965,8 +965,12 @@ const CRED_GROUPS = [
     'VOBIZ_SIP_DOMAIN','VOBIZ_USERNAME','VOBIZ_PASSWORD',
     'VOBIZ_OUTBOUND_NUMBER','OUTBOUND_TRUNK_ID','DEFAULT_TRANSFER_NUMBER',
   ], extras:`
-    <p class="tiny muted mb-2">Need a trunk ID? Click below to create one in LiveKit, then add the returned ID as the <span class="mono">OUTBOUND_TRUNK_ID</span> env var on your VPS.</p>
-    <button class="btn primary" onclick="createSIPTrunk()">⚡ Create SIP Trunk in LiveKit</button>
+    <p class="tiny muted mb-2">If <span class="mono">OUTBOUND_TRUNK_ID</span> is wrong (gets 404 on dial), click <strong>List trunks</strong> to see what's actually in LiveKit. Use <strong>Create SIP Trunk</strong> if none exist.</p>
+    <div class="row" style="gap:8px;flex-wrap:wrap">
+      <button class="btn small" onclick="listSIPTrunks()">🔍 List trunks</button>
+      <button class="btn primary small" onclick="createSIPTrunk()">⚡ Create SIP Trunk</button>
+    </div>
+    <pre id="trunks-output" class="tiny mt-2" style="background:var(--bg-2,#0d1117);padding:8px;border-radius:6px;display:none;max-height:300px;overflow:auto;white-space:pre-wrap;word-break:break-all"></pre>
   `},
   {id:'twilio', title:'💬 Twilio SMS (optional)', required:false, keys:[
     'TWILIO_ACCOUNT_SID','TWILIO_AUTH_TOKEN','TWILIO_FROM_NUMBER',
@@ -1032,6 +1036,36 @@ async function loadEnvCheck() {
     $('env-summary').innerHTML = '<span class="chip warn">env-check failed</span>';
   }
 }
+
+window.listSIPTrunks = async () => {
+  const out = $('trunks-output');
+  out.style.display = 'block';
+  out.textContent = 'Loading…';
+  try {
+    const r = await api('/api/setup/trunks');
+    let txt = `📊 Diagnosis: ${r.diagnosis}\n\n`;
+    txt += `Current OUTBOUND_TRUNK_ID env var: ${r.current_trunk_id || '(unset)'}\n`;
+    txt += `   • Format valid (starts with ST_): ${r.current_trunk_id_valid_format ? '✓ yes' : '✗ no'}\n`;
+    txt += `   • Exists in LiveKit project:      ${r.current_trunk_id_exists_in_livekit ? '✓ yes' : '✗ no'}\n\n`;
+    txt += `Found ${r.count} trunk(s) in this LiveKit project:\n`;
+    if (r.trunks.length === 0) {
+      txt += `\n  (none — click "Create SIP Trunk" to make one)\n`;
+    } else {
+      r.trunks.forEach(t => {
+        txt += `\n  ${t.is_current ? '👉' : '  '} ID:      ${t.id}\n`;
+        txt += `      Name:    ${t.name}\n`;
+        txt += `      Address: ${t.address}\n`;
+        txt += `      Numbers: ${t.numbers.join(', ') || '(none)'}\n`;
+      });
+      txt += `\n💡 To fix the 404 dial error, copy one of the IDs above (the ST_ prefixed one)\n`;
+      txt += `   into your VPS / Coolify env var:  OUTBOUND_TRUNK_ID=ST_xxxxxxxxxx\n`;
+      txt += `   Then redeploy the container.\n`;
+    }
+    out.textContent = txt;
+  } catch (e) {
+    out.textContent = `Error: ${e.message || e}`;
+  }
+};
 
 window.createSIPTrunk = async () => {
   if (!confirm('Create SIP outbound trunk in LiveKit using current VPS env vars?')) return;

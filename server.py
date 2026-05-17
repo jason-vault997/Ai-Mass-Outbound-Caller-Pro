@@ -415,6 +415,59 @@ async def api_setup_trunk():
         raise HTTPException(500, f"Trunk creation failed: {exc}")
 
 
+@app.get("/api/setup/trunks")
+async def api_list_trunks():
+    """List ALL LiveKit SIP outbound trunks for the configured project.
+
+    Use this to find the correct ``ST_xxxx`` trunk ID to put in your VPS
+    ``OUTBOUND_TRUNK_ID`` env var. A 404 from SIP dial usually means the
+    configured trunk_id doesn't exist (or belongs to a different project).
+    """
+    url = eff("LIVEKIT_URL")
+    key = eff("LIVEKIT_API_KEY")
+    secret = eff("LIVEKIT_API_SECRET")
+    if not (url and key and secret):
+        raise HTTPException(400, "Missing LiveKit env vars on the VPS.")
+
+    current_id = eff("OUTBOUND_TRUNK_ID")
+    try:
+        from livekit import api as lk_api
+        from livekit.protocol.sip import ListSIPOutboundTrunkRequest
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        session = aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=ctx))
+        lk = lk_api.LiveKitAPI(url=url, api_key=key, api_secret=secret, session=session)
+        resp = await lk.sip.list_outbound_trunk(ListSIPOutboundTrunkRequest())
+        trunks = [{
+            "id": t.sip_trunk_id,
+            "name": t.name,
+            "address": t.address,
+            "numbers": list(t.numbers),
+            "is_current": t.sip_trunk_id == current_id,
+        } for t in resp.items]
+        await lk.aclose()
+        await session.close()
+
+        valid_format = bool(current_id) and current_id.startswith("ST_")
+        current_exists = any(t["is_current"] for t in trunks)
+        return {
+            "trunks": trunks,
+            "count": len(trunks),
+            "current_trunk_id": current_id or None,
+            "current_trunk_id_valid_format": valid_format,
+            "current_trunk_id_exists_in_livekit": current_exists,
+            "diagnosis": (
+                "OUTBOUND_TRUNK_ID is not set on the VPS." if not current_id
+                else f"OUTBOUND_TRUNK_ID='{current_id}' is NOT a valid LiveKit trunk ID format (must start with ST_)." if not valid_format
+                else f"OUTBOUND_TRUNK_ID='{current_id}' does not exist in this LiveKit project (expected one of: {[t['id'] for t in trunks] or 'none — create one'})." if not current_exists
+                else "OK — current trunk is valid and exists."
+            ),
+        }
+    except Exception as exc:
+        raise HTTPException(500, f"List trunks failed: {exc}")
+
+
 # ── Logs ──────────────────────────────────────────────────────────────────────
 
 @app.get("/api/logs")
