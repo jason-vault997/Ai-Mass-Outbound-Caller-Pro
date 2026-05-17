@@ -9,6 +9,12 @@ __pycache__/
 *.pyc
 *.pyo
 *.pyd
+*.egg-info/
+
+# Local databases / artifacts
+*.db
+*.sqlite
+*.log
 
 # Node.js / Next.js
 node_modules/

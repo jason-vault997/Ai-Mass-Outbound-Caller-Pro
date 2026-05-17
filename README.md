@@ -1,110 +1,124 @@
-# LiveKit Vobiz Outbound Agent 📞
+# OutboundAI — AI Voice Calling SaaS
 
-A production-ready voice agent capable of making outbound calls using **LiveKit**, **Deepgram**, and **Groq (Llama 3.3)**.  
-Designed for reliability, speed, and ease of deployment.
+A **production-grade AI outbound voice calling platform** built around **Gemini Live**, **LiveKit Agents**, **Vobiz SIP**, and **Supabase**, with a single-page dashboard for campaigns, CRM, agent profiles, and BYOK configuration.
 
-## 🚀 Features
-- **Ultra-Fast LLM**: Uses **Groq** running `llama-3.3-70b-versatile` for near-instant responses.
-- **High-Quality Audio**: Uses **Deepgram** for both Speech-to-Text (STT) and Text-to-Speech (TTS).
-- **SIP Trunking**: Integrated with **Vobiz** for PSTN connectivity.
-- **Robust Configuration**: Centralized `config.py` for easy customization of prompts, models, and voices.
+> Evolved from the original `LIvekitAIVoice` (OpenAI/Deepgram/Groq pipeline). The legacy CLI utilities (`make_call.py`, `create_trunk.py`, `list_trunks.py`, `setup_trunk.py`, `config.py`) are kept around for reference and one-off ops, but the new architecture runs entirely through the FastAPI dashboard at port 8000.
 
 ---
 
-## 🛠️ Setup & Installation
+## 🚀 Architecture
 
-### 1. Prerequisites
-- Python 3.10+ (Recommended: 3.10.13)
-- A [LiveKit Cloud](https://cloud.livekit.io/) account
-- A [Deepgram](https://deepgram.com/) API Key
-- A [Groq](https://groq.com/) API Key
-- A SIP Provider (e.g., Vobiz)
+| Layer | Tech |
+|---|---|
+| Voice AI | Google **Gemini Live** (`gemini-3.1-flash-live-preview`) — single realtime model, no separate STT/TTS |
+| Voice orchestration | LiveKit Agents 1.x + LiveKit Cloud |
+| Telephony | Vobiz SIP outbound trunk |
+| API server | FastAPI + Uvicorn (port 8000) |
+| Database | Supabase (Postgres) |
+| Scheduling | APScheduler (cron-style campaigns) |
+| Recording | LiveKit Egress → S3-compatible storage |
+| UI | Single `ui/index.html` (vanilla JS + Chart.js CDN) |
+| Container | Docker → Coolify |
 
-### 2. Clone & Install
-```bash
-# Clone the repository
-git clone <your-repo-url>
-cd LiveKit-Vobiz-Outbound-main
+---
 
-# Create a virtual environment
-python3 -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
+## 📁 Project structure
 
-# Install dependencies
+```
+.
+├── agent.py              ← LiveKit worker (Gemini Live entrypoint, dial-first)
+├── server.py             ← FastAPI REST API + APScheduler
+├── db.py                 ← Async Supabase data layer
+├── tools.py              ← 9 LLM function tools
+├── prompts.py            ← Prompt template + builder
+├── start.sh              ← uvicorn :8000 + agent worker
+├── Dockerfile            ← CMD: sh start.sh
+├── requirements.txt
+├── supabase_schema.sql   ← Run once in Supabase SQL Editor
+├── .env.example
+├── ui/index.html         ← Full single-page dashboard
+└── (legacy: make_call.py, setup_trunk.py, create_trunk.py, list_trunks.py, config.py)
+```
+
+---
+
+## 🛠 First-time setup
+
+1. **Supabase** — create a project → SQL Editor → paste `supabase_schema.sql` → Run.
+2. **LiveKit Cloud** — create a project → grab `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`.
+3. **Gemini API key** — `aistudio.google.com/app/apikey`.
+4. **Vobiz SIP** — note your domain, username, password, outbound number.
+5. Copy `.env.example` to `.env` and fill in everything (OR set them via the dashboard Settings tab).
+
+### Local run
+
+```powershell
 pip install -r requirements.txt
+sh start.sh
 ```
 
-### 3. Configure Environment
-Copy the example environment file and fill in your credentials:
+Then open `http://localhost:8000` and:
+
+1. Settings → fill in LiveKit, Gemini, Vobiz → click **⚡ Create SIP Trunk**.
+2. ✏️ AI Prompt → customise for your business.
+3. 🤖 Agents → create at least one profile.
+4. 📞 Single Call → test with your own number.
+
+### Docker / Coolify
+
 ```bash
-cp .env.example .env
-nano .env  # Or open in your editor
+docker build -t outboundai .
+docker run -p 8000:8000 --env-file .env outboundai
 ```
-**Required Variables:**
-- `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_SECRET`
-- `DEEPGRAM_API_KEY`
-- `GROQ_API_KEY`
-- `VOBIZ_SIP_*` variables (for outbound calls)
+
+In Coolify: New Resource → GitHub → Dockerfile auto-detected → set env vars → set port `8000` → Deploy.
 
 ---
 
-## 🏃‍♂️ Usage
+## 🔑 Critical rules
 
-### 1. Start the Agent
-This runs the agent process which listens for room connections.
-```bash
-python agent.py start
-```
-
-### 2. Make an Outbound Call
-In a **new terminal window** (ensure `venv` is active), run:
-```bash
-python make_call.py --to +91XXXXXXXXXX
-```
-*Note: The number must include the country code (e.g., +1 or +91).*
+| # | Rule |
+|---|---|
+| 1 | **Dial first** — `await ctx.api.sip.create_sip_participant(..., wait_until_answered=True)` BEFORE `session.start()` |
+| 2 | **Never** use `close_on_disconnect=True` with SIP. Watch `participant_disconnected` event instead. |
+| 3 | Gemini 3.1 / 2.5 native-audio models speak autonomously — do **NOT** call `generate_reply()` on them. |
+| 4 | Use `EndSensitivity.END_SENSITIVITY_LOW` (full string), not `.LOW`. |
+| 5 | All 3 silence-prevention configs are mandatory (resumption + compression + RealtimeInputConfig). |
+| 6 | FastAPI on port 8000. The agent worker uses port 8081 internally. |
+| 7 | Settings priority: env vars → Supabase `settings` table → empty defaults. |
 
 ---
 
-## 🔧 Troubleshooting Guide
+## 💰 Cost (per minute)
 
-### ❌ Error: `model_decommissioned` (Groq/Llama)
-**Cause:** The configured LLM model is no longer supported by Groq.  
-**Fix:**
-1. Open `config.py`.
-2. Update `GROQ_MODEL` to a supported model (e.g., `llama-3.3-70b-versatile` or `llama-3.1-8b-instant`).
-3. **Restart `agent.py`** to apply changes.
+| Service | ₹ / min |
+|---|---|
+| Vobiz SIP | 1.00 |
+| LiveKit Cloud | 0.17 |
+| Gemini Live | 0.03 |
+| **Total** | **≈ 1.20** |
 
-### ❌ Error: `404 Not Found` (SIP Trunk)
-**Cause:** The `SIP_TRUNK_ID` in `.env` is incorrect or doesn't exist in your LiveKit project.  
-**Fix:**
-1. Run `python list_trunks.py` to see available trunks.
-2. If none exist, run `python create_trunk.py` to create one.
-3. Update `.env` with the correct ID.
-
-### ❌ Error: `Address already in use` (Port 8081)
-**Cause:** Another instance of `agent.py` is already running.  
-**Fix:**
-1. Find the process: `lsof -i :8081`
-2. Kill it: `kill -9 <PID>` or `pkill -f "python agent.py"`
-
-### ❌ Error: `No module named 'certifi'` or other imports
-**Cause:** Dependencies are missing.  
-**Fix:**
-1. Ensure your virtual environment is active (`source venv/bin/activate`).
-2. Run `pip install -r requirements.txt`.
-
-### ❌ Call Connects but No Audio
-**Cause:** TTS (Text-to-Speech) failure or WebSocket issues.  
-**Fix:**
-1. Check terminal logs for `APIStatusError`.
-2. If using OpenAI TTS, ensure you have OpenAI credits.
-3. Recommended: Switch to Deepgram TTS (set `TTS_PROVIDER=deepgram` in `.env`).
+A 2-minute call ≈ ₹2.40.
 
 ---
 
-## 📂 Project Structure
-- `agent.py`: Main application logic.
-- `config.py`: Central configuration for prompts, models, and constants.
-- `make_call.py`: Script to initiate outbound calls.
-- `create_trunk.py` / `setup_trunk.py`: Utilities for SIP trunk management.
-# LIvekitAIVoice
+## 🛟 Troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| Call drops at exactly 60s | Check that `close_on_disconnect=True` is NOT set. |
+| Agent goes silent after 30–90s | Confirm `EndSensitivity.END_SENSITIVITY_LOW` is the full enum string. |
+| 1008 error on session start | Switch from `gemini-2.0-flash-live-001` to `gemini-3.1-flash-live-preview`. |
+| `profiles.map is not a function` in UI | Run `supabase_schema.sql` to create `agent_profiles` table. |
+| Worker uses old model after Settings change | Redeploy — `load_db_settings_to_env` runs only at worker startup. |
+| `SSL certificate verify failed` | Already patched at top of `agent.py` and `server.py` via certifi. |
+
+---
+
+## 🧰 Legacy CLI utilities (still work)
+
+- `python make_call.py --to +91XXXXXXXXXX` — single test dial via the agent.
+- `python list_trunks.py` — list configured SIP trunks.
+- `python create_trunk.py` — create a SIP trunk via CLI.
+
+These pre-date the dashboard and don't use Supabase. Prefer the dashboard for production.

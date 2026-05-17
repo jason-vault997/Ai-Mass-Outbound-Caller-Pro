@@ -1,9 +1,17 @@
+# Local dev only. On the VPS / Coolify, env vars come from the platform's
+# environment variable panel — NOT from a .env file checked into the repo.
 services:
   voice-agent:
     build: .
     restart: unless-stopped
     env_file:
-      - .env
-    volumes:
-      - .:/app # For development/hot-reload (remove in prod)
-    network_mode: host # Recommended for WebRTC/Voice low latency
+      - .env       # Local dev: load .env. On VPS, omit this and use platform env.
+    ports:
+      - "8000:8000"
+    # network_mode: host  # Uncomment for lowest WebRTC latency in dev (Linux only).
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
