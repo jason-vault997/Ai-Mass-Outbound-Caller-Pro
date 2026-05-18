@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import ssl
+import time
 from typing import Optional
 
 import certifi
@@ -412,7 +413,16 @@ async def entrypoint(ctx: agents.JobContext) -> None:
                 "AI did not greet — relying on system-prompt autonomous behaviour",
             )
 
-    # ── Keep session alive until SIP participant actually leaves ─────────────
+    # ── Activity watchdog + duration cap + clean teardown ────────────────────
+    # Three layers of defence against runaway / dead-air calls:
+    #   1. Watchdog: if no AI/user activity for >20 s while SIP is still up,
+    #      inject a recovery prompt. Fixes Gemini Live's VAD-lockup bug.
+    #   2. Duration cap: hard upper bound configurable via env var
+    #      MAX_CALL_DURATION_SECONDS (default 270 s = 4 min 30 s).
+    #   3. Clean teardown: on disconnect, close session AND delete the room
+    #      so Vobiz SIP, Egress recording, and Gemini meter all stop.
+    max_call_duration = int(os.getenv("MAX_CALL_DURATION_SECONDS", "270"))
+
     if phone_number:
         sip_identity = f"sip_{phone_number}"
         disconnect_event = asyncio.Event()
@@ -427,23 +437,110 @@ async def entrypoint(ctx: agents.JobContext) -> None:
         ctx.room.on("participant_disconnected", _on_participant_disconnected)
         ctx.room.on("disconnected", _on_disconnected)
 
-        try:
-            await asyncio.wait_for(disconnect_event.wait(), timeout=3600)
-        except asyncio.TimeoutError:
-            await _log("warning", "Call reached 1-hour safety timeout — shutting down")
+        # Activity tracker — any session event resets the idle timer.
+        activity_state = {"last": time.time()}
 
-        await _log("info", f"SIP participant disconnected — ending session for {phone_number}")
+        def _bump_activity(*_args, **_kwargs):
+            activity_state["last"] = time.time()
+
+        # Hook every event the plugin might emit. Unknown ones silently no-op.
+        for evt in (
+            "user_speech_committed", "agent_speech_committed",
+            "user_state_changed", "agent_state_changed",
+            "speech_created", "function_tool_called",
+            "user_input_transcribed", "conversation_item_added",
+        ):
+            try:
+                session.on(evt, _bump_activity)
+            except Exception:
+                pass
+
+        async def _watchdog() -> None:
+            """Inject a recovery prompt if the line goes dead for >20 s."""
+            try:
+                while not disconnect_event.is_set():
+                    await asyncio.sleep(5)
+                    if disconnect_event.is_set():
+                        return
+                    idle = time.time() - activity_state["last"]
+                    if idle > 20:
+                        await _log(
+                            "warning",
+                            f"Dead-air detected ({int(idle)}s) — sending recovery prompt",
+                        )
+                        recovered = False
+                        try:
+                            await session.generate_reply(
+                                instructions=(
+                                    "The line has gone quiet. Politely check in by "
+                                    "saying: 'Hello, are you still there?'"
+                                )
+                            )
+                            recovered = True
+                        except Exception:
+                            try:
+                                await session.say(
+                                    "Hello, are you still there?",
+                                    allow_interruptions=True,
+                                )
+                                recovered = True
+                            except Exception as say_exc:
+                                await _log(
+                                    "error",
+                                    f"Watchdog recovery failed both paths: {say_exc}",
+                                )
+                        if recovered:
+                            _bump_activity()
+            except asyncio.CancelledError:
+                return
+
+        watchdog_task = asyncio.create_task(_watchdog())
+
+        try:
+            await asyncio.wait_for(disconnect_event.wait(), timeout=max_call_duration)
+            await _log("info", f"SIP participant disconnected — ending session for {phone_number}")
+        except asyncio.TimeoutError:
+            await _log(
+                "warning",
+                f"Hard duration cap reached ({max_call_duration}s) — force-ending call for {phone_number}",
+            )
+            disconnect_event.set()
+
+        # Stop the watchdog before tearing down the session.
+        watchdog_task.cancel()
+        try:
+            await watchdog_task
+        except (asyncio.CancelledError, Exception):
+            pass
+
+        # Close the agent session.
         try:
             await session.aclose()
         except Exception:
             pass
+
+        # Delete the LiveKit room — this hangs up any lingering SIP leg AND
+        # stops the Egress recording. Without this, the Gemini Live session
+        # meter and SIP minutes can keep accruing after the user hung up.
+        try:
+            await ctx.api.room.delete_room(api.DeleteRoomRequest(room=ctx.room.name))
+            await _log("info", f"Room {ctx.room.name} deleted — call fully torn down")
+        except Exception as exc:
+            await _log("warning", f"delete_room failed (non-fatal): {exc}")
+
+        ctx.shutdown()
     else:
         done = asyncio.Event()
         ctx.room.on("disconnected", lambda: done.set())
         try:
-            await asyncio.wait_for(done.wait(), timeout=3600)
+            await asyncio.wait_for(done.wait(), timeout=max_call_duration)
         except asyncio.TimeoutError:
             pass
+        try:
+            await session.aclose()
+        except Exception:
+            pass
+        ctx.shutdown()
 
 
 if __name__ == "__main__":
