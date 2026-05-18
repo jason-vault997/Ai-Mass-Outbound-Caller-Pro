@@ -218,10 +218,12 @@ async def entrypoint(ctx: agents.JobContext) -> None:
     voice_override = None
     model_override = None
     tools_override = None
+    agent_speaks_first = True  # default: AI greets first
 
     def _read(meta: dict) -> None:
         nonlocal phone_number, lead_name, business_name, service_type
         nonlocal custom_prompt, voice_override, model_override, tools_override
+        nonlocal agent_speaks_first
         phone_number = meta.get("phone_number") or phone_number
         lead_name = meta.get("lead_name") or lead_name
         business_name = meta.get("business_name") or business_name
@@ -231,6 +233,8 @@ async def entrypoint(ctx: agents.JobContext) -> None:
         voice_override = meta.get("voice_override") or voice_override
         model_override = meta.get("model_override") or model_override
         tools_override = meta.get("tools_override") or tools_override
+        if "agent_speaks_first" in meta:
+            agent_speaks_first = bool(meta["agent_speaks_first"])
 
     try:
         if ctx.job and ctx.job.metadata:
@@ -366,19 +370,43 @@ async def entrypoint(ctx: agents.JobContext) -> None:
                 await _log("warning", f"Recording start failed (non-fatal): {exc}")
 
     # ── Greeting ─────────────────────────────────────────────────────────────
-    # gemini-3.1 and gemini-2.5 native-audio speak autonomously from system prompt.
-    # generate_reply() is blocked by the plugin for these models — skip it entirely.
-    if "3.1" in active_model or "2.5" in active_model:
-        await _log("info", "Gemini native-audio: model will greet autonomously from system prompt")
+    # The agent profile's `speaks_first` toggle controls whether the AI opens
+    # the conversation. Default is True. We try generate_reply() first because
+    # it produces the most natural greeting; if the plugin blocks it for a
+    # particular realtime model we fall back to a direct session.say().
+    if not agent_speaks_first:
+        await _log("info", "agent_speaks_first=False — waiting for user to speak first")
     else:
-        greeting = (
-            f"The call just connected. Greet the lead and ask if you're speaking with {lead_name}."
-            if phone_number else "Greet the caller warmly."
+        greeting_text = (
+            f"Hi, am I speaking with {lead_name}?"
+            if phone_number else f"Hi, this is {business_name}. How can I help?"
         )
+        greeted = False
         try:
-            await session.generate_reply(instructions=greeting)
+            await session.generate_reply(
+                instructions=(
+                    f"The call has just connected. Speak immediately. Do not wait for "
+                    f"the user. Open with: \"{greeting_text}\""
+                )
+            )
+            greeted = True
+            await _log("info", "Greeting triggered via generate_reply")
         except Exception as gr_exc:
-            await _log("warning", f"generate_reply failed: {gr_exc}")
+            await _log(
+                "warning",
+                f"generate_reply blocked ({gr_exc}) — falling back to session.say()",
+            )
+            try:
+                await session.say(greeting_text, allow_interruptions=True)
+                greeted = True
+                await _log("info", "Greeting triggered via session.say()")
+            except Exception as say_exc:
+                await _log("error", f"Both greeting paths failed: {say_exc}")
+        if not greeted:
+            await _log(
+                "warning",
+                "AI did not greet — relying on system-prompt autonomous behaviour",
+            )
 
     # ── Keep session alive until SIP participant actually leaves ─────────────
     if phone_number:

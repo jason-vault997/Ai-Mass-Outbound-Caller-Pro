@@ -85,6 +85,10 @@ CREATE TABLE IF NOT EXISTS agent_profiles (
     system_prompt TEXT,
     enabled_tools TEXT DEFAULT '[]',
     is_default INTEGER DEFAULT 0,
+    speaks_first INTEGER DEFAULT 1,
     created_at TEXT NOT NULL
 );
 ALTER TABLE agent_profiles DISABLE ROW LEVEL SECURITY;
+
+-- Migration for existing installs: add the column if it's missing.
+ALTER TABLE agent_profiles ADD COLUMN IF NOT EXISTS speaks_first INTEGER DEFAULT 1;
