@@ -145,6 +145,10 @@ def _build_session(
             )
             realtime_input = _gt.RealtimeInputConfig(
                 automatic_activity_detection=_gt.AutomaticActivityDetection(
+                    # LOW start-sensitivity = AI is harder to interrupt.
+                    # Without this, Gemini defaults to HIGH and any phone-tap
+                    # / breath / shuffle triggers a false interrupt.
+                    start_of_speech_sensitivity=_gt.StartSensitivity.START_SENSITIVITY_LOW,
                     end_of_speech_sensitivity=_gt.EndSensitivity.END_SENSITIVITY_LOW,
                     silence_duration_ms=2000,
                     prefix_padding_ms=200,
