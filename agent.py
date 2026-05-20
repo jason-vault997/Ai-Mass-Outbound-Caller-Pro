@@ -145,7 +145,7 @@ def _build_session(
             )
             realtime_input = _gt.RealtimeInputConfig(
                 automatic_activity_detection=_gt.AutomaticActivityDetection(
-                    end_of_speech_sensitivity=_gt.EndSensitivity.END_SENSITIVITY_LOW,
+                    end_of_speech_sensitivity=_gt.EndSensitivity.END_SENSITIVITY_HIGH,
                     silence_duration_ms=800,
                     prefix_padding_ms=200,
                 ),
