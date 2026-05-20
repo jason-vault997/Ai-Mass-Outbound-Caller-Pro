@@ -125,7 +125,6 @@ class AgentProfileRequest(BaseModel):
     system_prompt: Optional[str] = None
     enabled_tools: str = "[]"
     is_default: bool = False
-    speaks_first: bool = True
 
 
 class PromptRequest(BaseModel):
@@ -218,7 +217,6 @@ async def api_dispatch_call(req: CallRequest):
     effective_voice = None
     effective_model = None
     effective_tools = None
-    effective_speaks_first = True  # default: AI greets first
 
     if req.agent_profile_id:
         profile = await get_agent_profile(req.agent_profile_id)
@@ -228,8 +226,6 @@ async def api_dispatch_call(req: CallRequest):
             effective_voice = profile.get("voice")
             effective_model = profile.get("model")
             effective_tools = profile.get("enabled_tools")
-            # Backwards-compat: NULL/missing column counts as "speaks first".
-            effective_speaks_first = profile.get("speaks_first") != 0
 
     if not effective_prompt:
         effective_prompt = await get_setting("system_prompt", "") or None
@@ -248,7 +244,6 @@ async def api_dispatch_call(req: CallRequest):
         metadata["model_override"] = effective_model
     if effective_tools:
         metadata["tools_override"] = effective_tools
-    metadata["agent_speaks_first"] = bool(effective_speaks_first)
 
     try:
         from livekit import api as lk_api
@@ -514,7 +509,7 @@ async def api_create_agent_profile(req: AgentProfileRequest):
         profile_id = await create_agent_profile(
             name=req.name, voice=req.voice, model=req.model,
             system_prompt=req.system_prompt, enabled_tools=req.enabled_tools,
-            is_default=req.is_default, speaks_first=req.speaks_first,
+            is_default=req.is_default,
         )
         return {"status": "created", "id": profile_id}
     except Exception as exc:
@@ -535,7 +530,6 @@ async def api_update_agent_profile(profile_id: str, req: AgentProfileRequest):
         "name": req.name, "voice": req.voice, "model": req.model,
         "system_prompt": req.system_prompt, "enabled_tools": req.enabled_tools,
         "is_default": 1 if req.is_default else 0,
-        "speaks_first": 1 if req.speaks_first else 0,
     })
     if not ok:
         raise HTTPException(404, "Profile not found")
@@ -583,9 +577,6 @@ async def _dispatch_one(
                 metadata["model_override"] = profile["model"]
             if profile.get("enabled_tools"):
                 metadata["tools_override"] = profile["enabled_tools"]
-            metadata["agent_speaks_first"] = profile.get("speaks_first") != 0
-        else:
-            metadata["agent_speaks_first"] = True
         await lk.room.create_room(
             lk_api_module.CreateRoomRequest(name=room_name, empty_timeout=300, max_participants=5)
         )

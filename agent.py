@@ -14,7 +14,6 @@ import json
 import logging
 import os
 import ssl
-import time
 from typing import Optional
 
 import certifi
@@ -146,10 +145,6 @@ def _build_session(
             )
             realtime_input = _gt.RealtimeInputConfig(
                 automatic_activity_detection=_gt.AutomaticActivityDetection(
-                    # LOW start-sensitivity = AI is harder to interrupt.
-                    # Without this, Gemini defaults to HIGH and any phone-tap
-                    # / breath / shuffle triggers a false interrupt.
-                    start_of_speech_sensitivity=_gt.StartSensitivity.START_SENSITIVITY_LOW,
                     end_of_speech_sensitivity=_gt.EndSensitivity.END_SENSITIVITY_LOW,
                     silence_duration_ms=2000,
                     prefix_padding_ms=200,
@@ -223,12 +218,10 @@ async def entrypoint(ctx: agents.JobContext) -> None:
     voice_override = None
     model_override = None
     tools_override = None
-    agent_speaks_first = True  # default: AI greets first
 
     def _read(meta: dict) -> None:
         nonlocal phone_number, lead_name, business_name, service_type
         nonlocal custom_prompt, voice_override, model_override, tools_override
-        nonlocal agent_speaks_first
         phone_number = meta.get("phone_number") or phone_number
         lead_name = meta.get("lead_name") or lead_name
         business_name = meta.get("business_name") or business_name
@@ -238,8 +231,6 @@ async def entrypoint(ctx: agents.JobContext) -> None:
         voice_override = meta.get("voice_override") or voice_override
         model_override = meta.get("model_override") or model_override
         tools_override = meta.get("tools_override") or tools_override
-        if "agent_speaks_first" in meta:
-            agent_speaks_first = bool(meta["agent_speaks_first"])
 
     try:
         if ctx.job and ctx.job.metadata:
@@ -375,54 +366,21 @@ async def entrypoint(ctx: agents.JobContext) -> None:
                 await _log("warning", f"Recording start failed (non-fatal): {exc}")
 
     # ── Greeting ─────────────────────────────────────────────────────────────
-    # The agent profile's `speaks_first` toggle controls whether the AI opens
-    # the conversation. Default is True. We try generate_reply() first because
-    # it produces the most natural greeting; if the plugin blocks it for a
-    # particular realtime model we fall back to a direct session.say().
-    if not agent_speaks_first:
-        await _log("info", "agent_speaks_first=False — waiting for user to speak first")
+    # gemini-3.1 and gemini-2.5 native-audio speak autonomously from system prompt.
+    # generate_reply() is blocked by the plugin for these models — skip it entirely.
+    if "3.1" in active_model or "2.5" in active_model:
+        await _log("info", "Gemini native-audio: model will greet autonomously from system prompt")
     else:
-        greeting_text = (
-            f"Hi, am I speaking with {lead_name}?"
-            if phone_number else f"Hi, this is {business_name}. How can I help?"
+        greeting = (
+            f"The call just connected. Greet the lead and ask if you're speaking with {lead_name}."
+            if phone_number else "Greet the caller warmly."
         )
-        greeted = False
         try:
-            await session.generate_reply(
-                instructions=(
-                    f"The call has just connected. Speak immediately. Do not wait for "
-                    f"the user. Open with: \"{greeting_text}\""
-                )
-            )
-            greeted = True
-            await _log("info", "Greeting triggered via generate_reply")
+            await session.generate_reply(instructions=greeting)
         except Exception as gr_exc:
-            await _log(
-                "warning",
-                f"generate_reply blocked ({gr_exc}) — falling back to session.say()",
-            )
-            try:
-                await session.say(greeting_text, allow_interruptions=True)
-                greeted = True
-                await _log("info", "Greeting triggered via session.say()")
-            except Exception as say_exc:
-                await _log("error", f"Both greeting paths failed: {say_exc}")
-        if not greeted:
-            await _log(
-                "warning",
-                "AI did not greet — relying on system-prompt autonomous behaviour",
-            )
+            await _log("warning", f"generate_reply failed: {gr_exc}")
 
-    # ── Activity watchdog + duration cap + clean teardown ────────────────────
-    # Three layers of defence against runaway / dead-air calls:
-    #   1. Watchdog: if no AI/user activity for >20 s while SIP is still up,
-    #      inject a recovery prompt. Fixes Gemini Live's VAD-lockup bug.
-    #   2. Duration cap: hard upper bound configurable via env var
-    #      MAX_CALL_DURATION_SECONDS (default 270 s = 4 min 30 s).
-    #   3. Clean teardown: on disconnect, close session AND delete the room
-    #      so Vobiz SIP, Egress recording, and Gemini meter all stop.
-    max_call_duration = int(os.getenv("MAX_CALL_DURATION_SECONDS", "270"))
-
+    # ── Keep session alive until SIP participant actually leaves ─────────────
     if phone_number:
         sip_identity = f"sip_{phone_number}"
         disconnect_event = asyncio.Event()
@@ -437,110 +395,23 @@ async def entrypoint(ctx: agents.JobContext) -> None:
         ctx.room.on("participant_disconnected", _on_participant_disconnected)
         ctx.room.on("disconnected", _on_disconnected)
 
-        # Activity tracker — any session event resets the idle timer.
-        activity_state = {"last": time.time()}
-
-        def _bump_activity(*_args, **_kwargs):
-            activity_state["last"] = time.time()
-
-        # Hook every event the plugin might emit. Unknown ones silently no-op.
-        for evt in (
-            "user_speech_committed", "agent_speech_committed",
-            "user_state_changed", "agent_state_changed",
-            "speech_created", "function_tool_called",
-            "user_input_transcribed", "conversation_item_added",
-        ):
-            try:
-                session.on(evt, _bump_activity)
-            except Exception:
-                pass
-
-        async def _watchdog() -> None:
-            """Inject a recovery prompt if the line goes dead for >20 s."""
-            try:
-                while not disconnect_event.is_set():
-                    await asyncio.sleep(5)
-                    if disconnect_event.is_set():
-                        return
-                    idle = time.time() - activity_state["last"]
-                    if idle > 20:
-                        await _log(
-                            "warning",
-                            f"Dead-air detected ({int(idle)}s) — sending recovery prompt",
-                        )
-                        recovered = False
-                        try:
-                            await session.generate_reply(
-                                instructions=(
-                                    "The line has gone quiet. Politely check in by "
-                                    "saying: 'Hello, are you still there?'"
-                                )
-                            )
-                            recovered = True
-                        except Exception:
-                            try:
-                                await session.say(
-                                    "Hello, are you still there?",
-                                    allow_interruptions=True,
-                                )
-                                recovered = True
-                            except Exception as say_exc:
-                                await _log(
-                                    "error",
-                                    f"Watchdog recovery failed both paths: {say_exc}",
-                                )
-                        if recovered:
-                            _bump_activity()
-            except asyncio.CancelledError:
-                return
-
-        watchdog_task = asyncio.create_task(_watchdog())
-
         try:
-            await asyncio.wait_for(disconnect_event.wait(), timeout=max_call_duration)
-            await _log("info", f"SIP participant disconnected — ending session for {phone_number}")
+            await asyncio.wait_for(disconnect_event.wait(), timeout=3600)
         except asyncio.TimeoutError:
-            await _log(
-                "warning",
-                f"Hard duration cap reached ({max_call_duration}s) — force-ending call for {phone_number}",
-            )
-            disconnect_event.set()
+            await _log("warning", "Call reached 1-hour safety timeout — shutting down")
 
-        # Stop the watchdog before tearing down the session.
-        watchdog_task.cancel()
-        try:
-            await watchdog_task
-        except (asyncio.CancelledError, Exception):
-            pass
-
-        # Close the agent session.
+        await _log("info", f"SIP participant disconnected — ending session for {phone_number}")
         try:
             await session.aclose()
         except Exception:
             pass
-
-        # Delete the LiveKit room — this hangs up any lingering SIP leg AND
-        # stops the Egress recording. Without this, the Gemini Live session
-        # meter and SIP minutes can keep accruing after the user hung up.
-        try:
-            await ctx.api.room.delete_room(api.DeleteRoomRequest(room=ctx.room.name))
-            await _log("info", f"Room {ctx.room.name} deleted — call fully torn down")
-        except Exception as exc:
-            await _log("warning", f"delete_room failed (non-fatal): {exc}")
-
-        ctx.shutdown()
     else:
         done = asyncio.Event()
         ctx.room.on("disconnected", lambda: done.set())
         try:
-            await asyncio.wait_for(done.wait(), timeout=max_call_duration)
+            await asyncio.wait_for(done.wait(), timeout=3600)
         except asyncio.TimeoutError:
             pass
-        try:
-            await session.aclose()
-        except Exception:
-            pass
-        ctx.shutdown()
 
 
 if __name__ == "__main__":

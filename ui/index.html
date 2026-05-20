@@ -339,10 +339,6 @@ hr.sep{border:none;border-top:1px solid var(--border);margin:18px 0}
       <label>System prompt (optional — overrides global)</label>
       <textarea id="ap-prompt" placeholder="Leave empty to use the global prompt…"></textarea>
     </div>
-    <div class="form-row">
-      <label class="config-toggle"><input type="checkbox" id="ap-speaks-first" checked /> AI speaks first (greets the lead immediately on call connect)</label>
-      <p class="tiny muted" style="margin-top:4px">Untick if you want the AI to wait for the user to say hello before responding (inbound-style flow).</p>
-    </div>
     <div class="form-row"><label class="config-toggle"><input type="checkbox" id="ap-default" /> Set as default profile</label></div>
     <div class="row">
       <button class="btn primary" onclick="saveAgentProfile()">💾 Save profile</button>
@@ -811,7 +807,6 @@ window.saveAgentProfile = async () => {
     system_prompt: $('ap-prompt').value || null,
     enabled_tools: $('ap-tools').value || '[]',
     is_default: $('ap-default').checked,
-    speaks_first: $('ap-speaks-first').checked,
   };
   if (!body.name) return toast('Name required', 'err');
   const r = id ? await apiPut(`/api/agent-profiles/${id}`, body) : await apiPost('/api/agent-profiles', body);
@@ -827,8 +822,6 @@ window.editAgentProfile = async (id) => {
   $('ap-prompt').value = p.system_prompt || '';
   $('ap-tools').value = p.enabled_tools || '[]';
   $('ap-default').checked = !!p.is_default;
-  // Backwards-compat: NULL/missing column counts as "speaks first".
-  $('ap-speaks-first').checked = (p.speaks_first !== 0);
   $('ap-form-title').textContent = `Edit profile — ${p.name}`;
   window.scrollTo({top:0, behavior:'smooth'});
 };
@@ -844,7 +837,6 @@ window.setDefaultAgentProfile = async (id, name) => {
 window.resetAgentForm = () => {
   $('ap-id').value = ''; $('ap-name').value = ''; $('ap-prompt').value = '';
   $('ap-tools').value = '[]'; $('ap-default').checked = false;
-  $('ap-speaks-first').checked = true;
   $('ap-voice').value = 'Aoede'; $('ap-model').value = 'gemini-3.1-flash-live-preview';
   $('ap-form-title').textContent = 'Create profile';
 };

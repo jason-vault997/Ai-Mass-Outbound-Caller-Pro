@@ -531,7 +531,6 @@ async def get_agent_profile(profile_id: str) -> Optional[dict]:
 async def create_agent_profile(
     name: str, voice: str = "Aoede", model: str = "gemini-3.1-flash-live-preview",
     system_prompt: Optional[str] = None, enabled_tools: str = "[]", is_default: bool = False,
-    speaks_first: bool = True,
 ) -> str:
     profile_id = str(uuid.uuid4())
     db = await _adb()
@@ -540,9 +539,7 @@ async def create_agent_profile(
     await db.table("agent_profiles").insert({
         "id": profile_id, "name": name, "voice": voice, "model": model,
         "system_prompt": system_prompt, "enabled_tools": enabled_tools,
-        "is_default": 1 if is_default else 0,
-        "speaks_first": 1 if speaks_first else 0,
-        "created_at": datetime.now().isoformat(),
+        "is_default": 1 if is_default else 0, "created_at": datetime.now().isoformat(),
     }).execute()
     return profile_id
 
