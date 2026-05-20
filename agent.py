@@ -126,6 +126,47 @@ try:
 except Exception as _ws_patch_err:
     logger.warning("WS keepalive patch failed: %s", _ws_patch_err)
 
+# ── GoAway suppression patch ─────────────────────────────────────────────────
+# livekit-plugins-google _handle_go_away always calls _session_should_close.set()
+# which forces a full client-side session teardown and re-initialization, causing
+# double-billing of the system prompt. With transparent=True configured, Google's
+# server handles the reconnect natively using the cached session handle — we just
+# need to stop the plugin from racing the server and opening a redundant Session 2.
+# After we suppress the GoAway, the server closes the WebSocket (after time_left),
+# the plugin's error handler reconnects using _session_resumption_handle, and
+# Google sees it as session continuation rather than a new session.
+try:
+    _realtime_session_cls = None
+    for _mod_path in (
+        "livekit.plugins.google.beta.realtime.realtime_api",
+        "livekit.plugins.google.realtime.realtime_api",
+    ):
+        try:
+            import importlib as _il
+            _mod = _il.import_module(_mod_path)
+            _realtime_session_cls = _mod.RealtimeSession
+            logger.info("GoAway patch: found RealtimeSession at %s", _mod_path)
+            break
+        except (ImportError, AttributeError):
+            continue
+
+    if _realtime_session_cls is not None:
+        def _patched_handle_go_away(self, go_away):
+            logger.info(
+                "GoAway intercepted (time_left=%s) — suppressing hard restart, "
+                "allowing transparent session resumption to avoid re-billing.",
+                getattr(go_away, "time_left", "?"),
+            )
+            if getattr(go_away, "session_resumption_handle", None):
+                self._session_resumption_handle = go_away.session_resumption_handle
+
+        _realtime_session_cls._handle_go_away = _patched_handle_go_away
+        logger.info("GoAway suppression patch applied successfully")
+    else:
+        logger.warning("GoAway suppression patch: RealtimeSession not found — skipping")
+except Exception as _go_away_patch_err:
+    logger.warning("GoAway suppression patch failed: %s", _go_away_patch_err)
+
 
 # ── Session factory ──────────────────────────────────────────────────────────
 
