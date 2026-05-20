@@ -282,31 +282,7 @@ async def entrypoint(ctx: agents.JobContext) -> None:
     await ctx.connect()
     await _log("info", f"Connected to LiveKit room: {ctx.room.name}")
 
-    # ── Dial — MUST come before session.start() ──────────────────────────────
-    if phone_number:
-        trunk_id = os.getenv("OUTBOUND_TRUNK_ID")
-        if not trunk_id:
-            await _log("error", "OUTBOUND_TRUNK_ID not set — cannot place outbound call")
-            ctx.shutdown()
-            return
-        await _log("info", f"Dialing {phone_number} via SIP trunk {trunk_id}")
-        try:
-            await ctx.api.sip.create_sip_participant(
-                api.CreateSIPParticipantRequest(
-                    room_name=ctx.room.name,
-                    sip_trunk_id=trunk_id,
-                    sip_call_to=phone_number,
-                    participant_identity=f"sip_{phone_number}",
-                    wait_until_answered=True,
-                )
-            )
-        except Exception as exc:
-            await _log("error", f"SIP dial FAILED for {phone_number}: {exc}")
-            ctx.shutdown()
-            return
-        await _log("info", f"Call ANSWERED — {phone_number} picked up, starting AI session now")
-
-    # ── Build and start Gemini Live ───────────────────────────────────────
+    # ── Build Gemini Live session early (pre-warm during ring time) ──────────
     active_model = model_override or os.getenv("GEMINI_MODEL", "gemini-3.1-flash-live-preview")
     await _log("info", f"Building AI session — model={active_model}")
     active_tools = tool_ctx.build_tool_list(enabled_tools)
@@ -333,8 +309,43 @@ async def entrypoint(ctx: agents.JobContext) -> None:
             room_input_options=RoomInputOptions(noise_cancellation=noise_cancellation.BVCTelephony()),
         )
 
-    await session.start(**session_kwargs)
-    await _log("info", "Agent session started — AI ready, generating greeting")
+    # Start session.start() as a background task so the Gemini Live WebSocket
+    # warms up during the SIP ring time (typically 5–20 s). By the time the
+    # lead picks up, the AI is already initialised and can speak immediately.
+    prewarm_task = asyncio.create_task(session.start(**session_kwargs))
+    await _log("info", "Gemini Live pre-warm started — dialing now")
+
+    # ── Dial ─────────────────────────────────────────────────────────────────
+    if phone_number:
+        trunk_id = os.getenv("OUTBOUND_TRUNK_ID")
+        if not trunk_id:
+            prewarm_task.cancel()
+            await _log("error", "OUTBOUND_TRUNK_ID not set — cannot place outbound call")
+            ctx.shutdown()
+            return
+        await _log("info", f"Dialing {phone_number} via SIP trunk {trunk_id}")
+        try:
+            await ctx.api.sip.create_sip_participant(
+                api.CreateSIPParticipantRequest(
+                    room_name=ctx.room.name,
+                    sip_trunk_id=trunk_id,
+                    sip_call_to=phone_number,
+                    participant_identity=f"sip_{phone_number}",
+                    wait_until_answered=True,
+                )
+            )
+        except Exception as exc:
+            prewarm_task.cancel()
+            await _log("error", f"SIP dial FAILED for {phone_number}: {exc}")
+            ctx.shutdown()
+            return
+        await _log("info", f"Call ANSWERED — {phone_number} picked up")
+
+    # Ensure session is fully started (usually already complete during ring time)
+    if not prewarm_task.done():
+        await _log("info", "Awaiting session warm-up completion...")
+        await prewarm_task
+    await _log("info", "AI session live — ready to speak")
 
     # ── Optional S3 recording ────────────────────────────────────────────────
     if phone_number:
