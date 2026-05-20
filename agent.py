@@ -368,7 +368,7 @@ async def entrypoint(ctx: agents.JobContext) -> None:
     # ── Greeting ─────────────────────────────────────────────────────────────
     # gemini-3.1 and gemini-2.5 native-audio speak autonomously from system prompt.
     # generate_reply() is blocked by the plugin for these models — skip it entirely.
-    if "3.1" in active_model or "2.5" in active_model:
+    if "live" in active_model or "native-audio" in active_model:
         await _log("info", "Gemini native-audio: model will greet autonomously from system prompt")
     else:
         greeting = (
