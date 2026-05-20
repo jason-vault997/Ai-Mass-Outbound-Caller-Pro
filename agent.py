@@ -158,7 +158,7 @@ def _build_session(
         try:
             from google.genai import types as _gt
 
-            session_resumption = _gt.SessionResumptionConfig(transparent=False)
+            session_resumption = _gt.SessionResumptionConfig(transparent=True)
             context_compression = _gt.ContextWindowCompressionConfig(
                 trigger_tokens=25600,
                 sliding_window=_gt.SlidingWindow(target_tokens=12800),
