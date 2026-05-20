@@ -146,7 +146,7 @@ def _build_session(
             realtime_input = _gt.RealtimeInputConfig(
                 automatic_activity_detection=_gt.AutomaticActivityDetection(
                     end_of_speech_sensitivity=_gt.EndSensitivity.END_SENSITIVITY_HIGH,
-                    silence_duration_ms=800,
+                    silence_duration_ms=500,
                     prefix_padding_ms=200,
                 ),
             )
@@ -395,16 +395,26 @@ async def entrypoint(ctx: agents.JobContext) -> None:
     if phone_number:
         sip_identity = f"sip_{phone_number}"
         disconnect_event = asyncio.Event()
+        await _log("info", f"Watching for disconnect of participant: {sip_identity}")
 
         def _on_participant_disconnected(participant: rtc.RemoteParticipant):
+            logger.info("Participant left room: %s (watching: %s)", participant.identity, sip_identity)
             if participant.identity == sip_identity:
                 disconnect_event.set()
 
         def _on_disconnected():
+            logger.info("Room disconnected — ending session")
             disconnect_event.set()
 
         ctx.room.on("participant_disconnected", _on_participant_disconnected)
         ctx.room.on("disconnected", _on_disconnected)
+
+        # Guard against race condition: SIP participant may have left
+        # in the narrow window between call-answer and handler registration.
+        current_ids = {p.identity for p in ctx.room.remote_participants.values()}
+        if sip_identity not in current_ids:
+            await _log("warning", f"SIP participant already gone before handler registered — cleaning up")
+            disconnect_event.set()
 
         try:
             await asyncio.wait_for(disconnect_event.wait(), timeout=3600)
