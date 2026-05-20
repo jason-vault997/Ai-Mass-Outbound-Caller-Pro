@@ -106,6 +106,26 @@ try:
 except ImportError:
     pass
 
+# ── WebSocket keepalive patch ────────────────────────────────────────────────
+# google.genai.live calls ws_connect without ping_interval/ping_timeout, so
+# the default (ping_interval=20s, ping_timeout=20s) is used. On VPS deployments
+# behind a proxy or NAT with ~60s idle-timeout, this is just barely enough to
+# trigger a silent drop mid-call. We inject ping_interval=10s so the WebSocket
+# sends a keepalive ping every 10 seconds and the proxy never sees 60s silence.
+try:
+    import google.genai.live as _genai_live
+    _orig_ws_connect = _genai_live.ws_connect
+
+    def _keepalive_ws_connect(*args, **kwargs):
+        kwargs.setdefault("ping_interval", 10)
+        kwargs.setdefault("ping_timeout", 30)
+        return _orig_ws_connect(*args, **kwargs)
+
+    _genai_live.ws_connect = _keepalive_ws_connect
+    logger.info("WS keepalive patch applied: ping_interval=10s ping_timeout=30s")
+except Exception as _ws_patch_err:
+    logger.warning("WS keepalive patch failed: %s", _ws_patch_err)
+
 
 # ── Session factory ──────────────────────────────────────────────────────────
 
