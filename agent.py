@@ -117,10 +117,10 @@ def _build_session(
 ) -> AgentSession:
     """Build AgentSession with Gemini Live (preferred) or pipeline fallback.
 
-    All three silence-prevention configs are MANDATORY for Gemini Live:
-      1. SessionResumptionConfig(transparent=True) — auto-reconnects on timeout
+    Silence-prevention configs for Gemini Live:
+      1. SessionResumptionConfig(transparent=False) — lets GoAway end cleanly without crash
       2. ContextWindowCompressionConfig — prevents freeze when context fills up
-      3. RealtimeInputConfig with EndSensitivity.END_SENSITIVITY_LOW + 2s silence
+      3. RealtimeInputConfig with EndSensitivity.END_SENSITIVITY_HIGH + silence_duration_ms
 
     Credentials come from os.environ. Per-call ``voice_override`` /
     ``model_override`` only affect THIS session — they are never written back
@@ -138,7 +138,7 @@ def _build_session(
         try:
             from google.genai import types as _gt
 
-            session_resumption = _gt.SessionResumptionConfig(transparent=True)
+            session_resumption = _gt.SessionResumptionConfig(transparent=False)
             context_compression = _gt.ContextWindowCompressionConfig(
                 trigger_tokens=25600,
                 sliding_window=_gt.SlidingWindow(target_tokens=12800),
@@ -406,10 +406,11 @@ async def entrypoint(ctx: agents.JobContext) -> None:
         ctx.room.on("participant_disconnected", _on_participant_disconnected)
         ctx.room.on("disconnected", _on_disconnected)
 
+        max_dur = int(os.getenv("MAX_CALL_DURATION_SECONDS", "150"))
         try:
-            await asyncio.wait_for(disconnect_event.wait(), timeout=3600)
+            await asyncio.wait_for(disconnect_event.wait(), timeout=max_dur)
         except asyncio.TimeoutError:
-            await _log("warning", "Call reached 1-hour safety timeout — shutting down")
+            await _log("warning", f"Call reached {max_dur}s hard cap — shutting down")
 
         await _log("info", f"SIP participant disconnected — ending session for {phone_number}")
         try:
